@@ -1,24 +1,8 @@
-#!/bin/bash
-exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-
-set -e
-
-echo "Starting user_data setup for CPU LightGBM fallback"
-
-dnf update -y
-dnf install -y python3 python3-pip
-
-# python3 -m pip install --upgrade pip
-python3 -m pip install lightgbm scikit-learn pandas numpy kaggle
-
-mkdir -p /home/ec2-user/ml-benchmark
-cat > /home/ec2-user/ml-benchmark/benchmark.py <<'PY'
 import json
 import time
 from pathlib import Path
 
 import lightgbm as lgb
-import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
@@ -121,46 +105,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-PY
-
-chown -R ec2-user:ec2-user /home/ec2-user/ml-benchmark
-
-cat > /opt/lightgbm_health_server.py <<'PY'
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-            return
-
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"CPU LightGBM fallback node is running")
-
-
-HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
-PY
-
-cat > /etc/systemd/system/lightgbm-health.service <<'EOF'
-[Unit]
-Description=LightGBM fallback health server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /opt/lightgbm_health_server.py
-Restart=always
-User=ec2-user
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable lightgbm-health
-systemctl start lightgbm-health
-
-echo "CPU LightGBM fallback setup completed"

@@ -1,0 +1,15 @@
+{
+  "dataset_source": "synthetic_fallback",
+  "rows": 284807,
+  "features": 30,
+  "load_data_seconds": 0.6307,
+  "training_seconds": 5.6181,
+  "best_iteration": 57,
+  "auc_roc": 0.631897,
+  "accuracy": 0.993136,
+  "f1_score": 0.034568,
+  "precision": 0.538462,
+  "recall": 0.017857,
+  "inference_latency_ms_1_row": 1.736,
+  "inference_throughput_rows_per_second_1000_rows": 267580.58
+}

@@ -1,5 +1,7 @@
 # Hướng dẫn Thực hành LAB 16: Cloud AI Environment Setup (2.5h)
 
+> **Dành cho tài khoản AWS Free Tier / tài khoản mới:** Repo này đang được cấu hình theo **Phần 7: Phương án Dự phòng — CPU Instance với LightGBM** vì tài khoản free thường không xin được quota GPU. Nếu không có GPU quota, hãy đi thẳng tới Phần 7 để triển khai `r5.2xlarge`, chạy `benchmark.py`, chụp Billing và nộp bài.
+
 Chào mừng các bạn đến với Lab 16. Trong bài thực hành này, chúng ta sẽ thiết lập một môi trường Cloud AI hoàn chỉnh trên AWS bằng cách sử dụng **Terraform** (Infrastructure as Code) và **Docker/vLLM**. 
 
 Mục tiêu của bài lab là triển khai một mô hình ngôn ngữ lớn (LLM - cụ thể là `google/gemma-4-E2B-it`) lên một máy chủ GPU (NVIDIA T4) nằm an toàn trong mạng nội bộ (Private VPC), và cung cấp API truy cập ra bên ngoài thông qua Load Balancer.
@@ -163,74 +165,82 @@ Gõ `yes` khi được hỏi. Quá trình xóa sẽ mất khoảng 5 phút. Hãy
 
 > **Ghi chú (tiếng Việt):** Đây là phương án dành cho các bạn dùng tài khoản AWS mới hoặc Free Tier. Do các tài khoản mới bị hạn chế quota GPU nghiêm ngặt (mặc định = 0 vCPU cho dòng G/VT), yêu cầu tăng quota thường bị trì hoãn hoặc từ chối. Thay vì bỏ qua bài lab, bạn sẽ chuyển sang triển khai một **bài toán Machine Learning thực tế** (LightGBM — gradient boosting) trên một **instance CPU cao cấp**. Quy trình này vẫn đầy đủ: Terraform IaC → Cloud instance → Training → Inference → Billing check, chỉ khác là không cần GPU.
 
-### 7.1: Thay đổi instance type trong Terraform
+Trong repo này, thư mục `terraform/` đã được chỉnh sẵn theo phương án CPU:
+- CPU node dùng `r5.2xlarge` (8 vCPU, 32 GB RAM), không cần quota GPU.
+- AMI dùng Amazon Linux 2023, không dùng Deep Learning GPU AMI.
+- Script `user_data.sh` tự cài Python, LightGBM, scikit-learn, pandas, numpy, kaggle.
+- File `benchmark.py` được đặt sẵn tại `~/ml-benchmark/benchmark.py` trên CPU node.
+- ALB vẫn được tạo để giữ kiến trúc hạ tầng giống bài gốc; endpoint `/health` dùng để kiểm tra CPU node đã chạy.
 
-Mở file `terraform/main.tf` và tìm dòng khai báo GPU Node (khoảng dòng 209):
+### 7.1: Tạo SSH key cho Terraform
 
-```hcl
-# Trước (GPU):
-instance_type = "g4dn.xlarge"
+Terraform cần public key `terraform/lab-key.pub` để tạo AWS Key Pair. Trên PowerShell, chạy:
 
-# Sau (CPU cao cấp — 8 vCPU, 32 GB RAM):
-instance_type = "r5.2xlarge"
-```
-
-> **Tại sao `r5.2xlarge`?** Instance này có 8 vCPU và 32 GB RAM, không yêu cầu quota đặc biệt, đủ mạnh để chạy gradient boosting với dataset hàng trăm nghìn dòng và không cần Deep Learning AMI. Chi phí ~$0.504/giờ tại us-east-1 — tương đương `g4dn.xlarge` (~$0.526/giờ).
-
-Ngoài ra, cập nhật AMI trong cùng resource sang Amazon Linux 2023 thông thường (không cần Deep Learning AMI):
-
-```bash
-# Lấy AMI ID của Amazon Linux 2023 tại us-east-1
-aws ec2 describe-images \
-  --region us-east-1 \
-  --owners amazon \
-  --filters "Name=name,Values=al2023-ami-*-x86_64" \
-            "Name=state,Values=available" \
-  --query "sort_by(Images, &CreationDate)[-1].ImageId" \
-  --output text
-```
-
-Sau đó thay giá trị AMI trong `main.tf` GPU Node block bằng AMI ID vừa lấy được.
-
-### 7.2: Triển khai hạ tầng
-
-```bash
+```powershell
 cd terraform
-export TF_VAR_hf_token="dummy"   # Không cần HF token khi chạy LGBM
+ssh-keygen -t rsa -b 4096 -f lab-key
+```
+
+Khi được hỏi passphrase, có thể nhấn Enter để bỏ trống cho dễ làm lab. Sau lệnh này sẽ có:
+- `lab-key`: private key dùng để SSH, **không nộp công khai**.
+- `lab-key.pub`: public key để Terraform tạo Key Pair.
+
+### 7.2: Triển khai hạ tầng CPU
+
+Đăng nhập AWS CLI trước:
+
+```powershell
+aws configure
+```
+
+Sau đó chạy Terraform:
+
+```powershell
+cd terraform
+terraform init
 terraform apply
 ```
 
-Gõ `yes` khi được hỏi. Quá trình tạo hạ tầng (NAT Gateway, ALB) mất khoảng **10–15 phút** như bình thường.
+Gõ `yes` khi được hỏi. Quá trình tạo VPC, NAT Gateway, Bastion, CPU node và ALB mất khoảng **10–15 phút**.
+
+Khi chạy xong, Terraform sẽ in ra các output quan trọng:
+- `bastion_public_ip`: IP public của Bastion Host.
+- `cpu_private_ip`: IP private của CPU node.
+- `ssh_to_cpu_node`: lệnh SSH từ máy local vào CPU node thông qua Bastion.
+- `cpu_health_url`: URL kiểm tra ALB/CPU node, mở ra thấy `ok` là đúng.
 
 ### 7.3: Kết nối vào CPU Instance
 
-Từ Terraform outputs, lấy `bastion_public_ip` và `gpu_private_ip` (bây giờ là CPU node):
+Dùng output `ssh_to_cpu_node` mà Terraform in ra. Ví dụ:
 
-```bash
-# SSH vào Bastion Host
-ssh -i <KEY_FILE>.pem ec2-user@<BASTION_PUBLIC_IP>
-
-# Từ Bastion, SSH vào CPU Node
-ssh ec2-user@<CPU_PRIVATE_IP>
+```powershell
+ssh -i lab-key -J ubuntu@<BASTION_PUBLIC_IP> ec2-user@<CPU_PRIVATE_IP>
 ```
 
-### 7.4: Cài đặt môi trường ML
+Giải thích:
+- Bastion Host đang dùng Ubuntu AMI nên user là `ubuntu`.
+- CPU node đang dùng Amazon Linux 2023 nên user là `ec2-user`.
 
-Trên CPU Node, chạy các lệnh sau:
+Nếu SSH báo lỗi quyền private key trên Windows, chạy PowerShell bằng quyền user hiện tại và thử lại. Không upload `lab-key` lên GitHub.
+
+### 7.4: Chạy benchmark LightGBM
+
+Sau khi SSH vào CPU node:
 
 ```bash
-# Cập nhật hệ thống và cài Python packages
-sudo dnf update -y
-sudo dnf install -y python3 python3-pip
-
-pip3 install --upgrade pip
-pip3 install lightgbm scikit-learn pandas numpy kaggle
-
-# Tạo thư mục làm việc
-mkdir -p ~/ml-benchmark && cd ~/ml-benchmark
+cd ~/ml-benchmark
+python3 benchmark.py
 ```
 
-### 7.5: Tải Dataset từ Kaggle
+Script sẽ train LightGBM và in các chỉ số benchmark ra terminal, đồng thời tạo file:
+
+```bash
+~/ml-benchmark/benchmark_result.json
+```
+
+Nếu bạn chưa tải Kaggle dataset, script vẫn chạy bằng synthetic dataset có cùng quy mô dòng để bạn kiểm tra pipeline. Nếu giáo viên yêu cầu đúng dataset Credit Card Fraud Detection, làm thêm bước 7.5 trước khi chạy benchmark.
+
+### 7.5: Tải Dataset từ Kaggle (Khuyến nghị cho bài nộp)
 
 Chúng ta sẽ dùng **Credit Card Fraud Detection** — bộ dữ liệu chuẩn cho benchmark ML với 284,807 giao dịch thực.
 
@@ -250,10 +260,22 @@ chmod 600 ~/.kaggle/kaggle.json
 kaggle datasets download -d mlg-ulb/creditcardfraud --unzip -p ~/ml-benchmark/
 ```
 
+Sau khi tải xong, chạy lại:
+
+```bash
+cd ~/ml-benchmark
+python3 benchmark.py
+```
+
 ### 7.6: Kết quả Benchmark trên `r5.2xlarge`
+
+Điền kết quả từ terminal hoặc từ file `benchmark_result.json`:
 
 | Metric | Kết quả |
 |---|---|
+| Dataset source | `kaggle_creditcard` hoặc `synthetic_fallback` |
+| Rows | |
+| Features | |
 | Thời gian load data | |
 | Thời gian training | |
 | Best iteration | |
@@ -291,7 +313,7 @@ Nếu sử dụng phương án CPU + LightGBM, nộp các mục sau (được ch
 
 1. **Screenshot terminal** chạy `python3 benchmark.py` với toàn bộ output kết quả.
 2. **File `benchmark_result.json`** chứa metrics đầy đủ (training time, AUC, inference latency).
-3. **Screenshot AWS Billing** sau 1 giờ triển khai, thể hiện EC2 và NAT Gateway.
+3. **Screenshot AWS Billing** sau 1 giờ triển khai, thể hiện EC2, NAT Gateway và Load Balancer nếu có.
 4. **Mã nguồn** thư mục `terraform/` đã chỉnh sửa (với `r5.2xlarge`).
 5. **Báo cáo ngắn** (5–10 dòng): so sánh kết quả training time, AUC, inference speed; giải thích lý do phải dùng CPU thay GPU.
 

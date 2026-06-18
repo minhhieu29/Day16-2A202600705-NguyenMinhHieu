@@ -102,7 +102,7 @@ resource "aws_security_group" "bastion_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] 
+    cidr_blocks = ["0.0.0.0/0"]
   }
   egress {
     from_port   = 0
@@ -172,13 +172,17 @@ resource "aws_instance" "bastion" {
   tags = { Name = "AI-Bastion-Host" }
 }
 
-# 5. GPU Instance
-data "aws_ami" "deep_learning" {
+# 5. CPU Instance for LightGBM fallback
+data "aws_ami" "amazon_linux_2023" {
   most_recent = true
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)*"]
+    values = ["al2023-ami-*-x86_64"]
+  }
+  filter {
+    name   = "state"
+    values = ["available"]
   }
 }
 
@@ -205,24 +209,21 @@ resource "aws_iam_instance_profile" "ai_profile" {
 }
 
 resource "aws_instance" "gpu_node" {
-  ami                    = data.aws_ami.deep_learning.id
-  instance_type          = "g4dn.xlarge" 
+  ami                    = data.aws_ami.amazon_linux_2023.id
+  instance_type          = "t3.large"
   subnet_id              = aws_subnet.private[0].id
   vpc_security_group_ids = [aws_security_group.gpu_sg.id]
   key_name               = aws_key_pair.lab_key.key_name
   iam_instance_profile   = aws_iam_instance_profile.ai_profile.name
 
   root_block_device {
-    volume_size = 150 
+    volume_size = 50
     volume_type = "gp3"
   }
 
-  user_data = templatefile("${path.module}/user_data.sh", {
-    hf_token = var.hf_token
-    model_id = var.model_id
-  })
+  user_data = file("${path.module}/user_data.sh")
 
-  tags = { Name = "AI-Inference-Node" }
+  tags = { Name = "AI-CPU-LightGBM-Node" }
 }
 
 # 6. Load Balancer
